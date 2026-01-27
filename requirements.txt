@@ -1,0 +1,21 @@
+# Drug Chart Project Dependencies
+
+# Office document processing (Windows only)
+pywin32>=306; platform_system == "Windows"
+
+# LLM API client
+openai>=1.0.0
+
+# Configuration management
+python-dotenv>=1.0.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Chart generation
+plotly>=5.18.0
+kaleido>=0.2.1
+
+# Utilities
+tqdm>=4.66.0
