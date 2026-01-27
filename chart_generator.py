@@ -1,12 +1,14 @@
 """
-Chart generator module for creating interactive stability trend charts
+Chart generator module for creating static stability trend charts
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-import plotly.express as px
+from typing import Dict, List, Optional, Tuple
+import re
+
+import matplotlib.pyplot as plt
+import numpy as np
+
 from config import (
     CHART_WIDTH,
     CHART_TITLE_FONT_SIZE,
@@ -17,308 +19,257 @@ from config import (
 
 
 class ChartGenerator:
-    """Generate interactive HTML charts for stability data"""
+    """Generate static PNG charts for stability data"""
 
     def __init__(self):
         self.charts_generated = []
 
     @staticmethod
-    def _apply_professional_style(
-        fig: go.Figure,
-        n_rows: int,
-        show_legend: bool
-    ) -> None:
-        """Apply a consistent professional styling to a Plotly figure"""
-        height_per_row = 320
-        min_height = 520
-        fig.update_layout(
-            template="plotly_white",
-            font=dict(
-                family="Helvetica, Arial, sans-serif",
-                size=CHART_AXIS_FONT_SIZE,
-                color="#1f2937",
-            ),
-            width=CHART_WIDTH,
-            height=max(min_height, height_per_row * n_rows),
-            margin=dict(l=80, r=40, t=90, b=70),
-            hovermode="x unified",
-            hoverlabel=dict(
-                bgcolor="white",
-                bordercolor="rgba(0,0,0,0.15)",
-                font=dict(color="#111827"),
-            ),
-            showlegend=show_legend,
-            legend=dict(
-                orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1,
-                font=dict(size=CHART_LEGEND_FONT_SIZE),
-                bgcolor="rgba(255,255,255,0.75)",
-                bordercolor="rgba(0,0,0,0.08)",
-                borderwidth=1,
-            ),
-        )
-        fig.update_xaxes(
-            showgrid=True,
-            gridcolor="rgba(0,0,0,0.08)",
-            zeroline=False,
-            ticks="outside",
-            tickcolor="rgba(0,0,0,0.2)",
-            title_font=dict(size=CHART_AXIS_FONT_SIZE),
-        )
-        fig.update_yaxes(
-            showgrid=True,
-            gridcolor="rgba(0,0,0,0.08)",
-            zeroline=False,
-            ticks="outside",
-            tickcolor="rgba(0,0,0,0.2)",
-            title_font=dict(size=CHART_AXIS_FONT_SIZE),
+    def _set_style() -> None:
+        plt.rcParams.update(
+            {
+                "figure.dpi": 150,
+                "savefig.dpi": 300,
+                "font.size": CHART_AXIS_FONT_SIZE,
+                "axes.titlesize": CHART_AXIS_FONT_SIZE + 2,
+                "axes.labelsize": CHART_AXIS_FONT_SIZE,
+                "legend.fontsize": CHART_LEGEND_FONT_SIZE,
+                "axes.grid": True,
+                "grid.color": "#e5e7eb",
+                "grid.linestyle": "-",
+                "grid.linewidth": 0.8,
+                "axes.edgecolor": "#d1d5db",
+                "axes.spines.top": False,
+                "axes.spines.right": False,
+                "axes.facecolor": "white",
+                "figure.facecolor": "white",
+                "lines.linewidth": 2.0,
+                "lines.markersize": 5.0,
+                # Font fallback for CJK
+                "font.sans-serif": [
+                    "PingFang SC",
+                    "Noto Sans CJK SC",
+                    "Microsoft YaHei",
+                    "SimHei",
+                    "DejaVu Sans",
+                ],
+            }
         )
 
     @staticmethod
-    def _get_test_item_color(test_item: str, item_index: int) -> str:
-        """Get color for a test item based on index
+    def _parse_month(tp: str) -> Optional[int]:
+        match = re.search(r"\d+", str(tp))
+        if match:
+            return int(match.group())
+        return None
 
-        Args:
-            test_item: Test item name
-            item_index: Index of test item
-
-        Returns:
-            Color string
-        """
-        # Use color based on item index
-        colors = px.colors.qualitative.Set2
-        return colors[item_index % len(colors)]
+    def _build_time_axis(self, data_list: List[Dict]) -> List[str]:
+        seen = {}
+        for data in data_list:
+            for tp in data.get("time_points", []):
+                label = str(tp)
+                if label not in seen:
+                    seen[label] = self._parse_month(label)
+        items = list(seen.items())
+        items.sort(key=lambda x: (x[1] is None, x[1] if x[1] is not None else 0, x[0]))
+        return [label for label, _ in items]
 
     @staticmethod
-    def _get_batch_palette() -> Sequence[str]:
+    def _get_palette() -> List[str]:
         return [
             "#2563eb", "#16a34a", "#f59e0b", "#ef4444", "#8b5cf6",
             "#0ea5e9", "#f97316", "#14b8a6", "#db2777", "#64748b",
         ]
+
+    @staticmethod
+    def _figure_size(n_rows: int) -> Tuple[float, float]:
+        width_in = max(10.0, CHART_WIDTH / 100.0)
+        height_in = max(3.0, n_rows * 3.0)
+        return width_in, height_in
+
+    @staticmethod
+    def _apply_limits(ax, lower: Optional[float], upper: Optional[float]) -> None:
+        if lower is None and upper is None:
+            return
+        if lower is not None:
+            ax.axhline(lower, color="#9ca3af", linestyle="--", linewidth=1.2, label="下限")
+        if upper is not None:
+            ax.axhline(upper, color="#9ca3af", linestyle="--", linewidth=1.2, label="上限")
+        if lower is not None and upper is not None and lower < upper:
+            x_min, x_max = ax.get_xlim()
+            ax.fill_between(
+                [x_min, x_max],
+                lower,
+                upper,
+                color="#e5e7eb",
+                alpha=0.35,
+                zorder=0,
+            )
 
     def create_single_batch_chart(
         self,
         data: Dict,
         save: bool = True,
         output_dir: Optional[Path] = None
-    ) -> go.Figure:
-        """Create a chart for a single batch
-
-        Args:
-            data: Cleaned stability data dictionary
-            save: Whether to save chart to file
-            output_dir: Output directory (uses CHARTS_DIR by default)
-
-        Returns:
-            Plotly Figure object
-        """
+    ) -> Path:
+        """Create a chart for a single batch and save as PNG"""
         if output_dir is None:
             output_dir = CHARTS_DIR
-
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Get data
+        self._set_style()
+
         product = data["product_name"]
         batch = data["batch_number"]
         market = data["market_standard"]
         condition = data["test_condition"]
         time_points = data["time_points"]
         test_items = data["test_items"]
+        test_limits = data.get("test_limits", {})
 
-        # Create subplots - one for each test item
         n_items = len(test_items)
-        fig = make_subplots(
-            rows=n_items,
-            cols=1,
-            subplot_titles=list(test_items.keys()),
-            vertical_spacing=0.08,
-        )
+        fig, axes = plt.subplots(n_items, 1, figsize=self._figure_size(n_items), sharex=True)
+        if n_items == 1:
+            axes = [axes]
 
-        # Add traces for each test item
+        x = np.arange(len(time_points))
         for idx, (item_name, values) in enumerate(test_items.items()):
-            row = idx + 1
+            ax = axes[idx]
+            y = np.array([v if v is not None else np.nan for v in values], dtype=float)
+            ax.plot(x, y, marker="o", color="#2563eb")
+            ax.set_title(item_name, loc="left", fontweight="bold")
+            ax.set_ylabel(item_name)
 
-            fig.add_trace(
-                go.Scatter(
-                    x=time_points,
-                    y=values,
-                    mode="lines+markers",
-                    name=f"{batch} - {item_name}",
-                    line=dict(color=self._get_test_item_color(item_name, idx), width=2.5),
-                    marker=dict(size=7, line=dict(width=1, color="white")),
-                    hovertemplate="%{x}<br>%{y:.3f}<extra></extra>",
-                ),
-                row=row,
-                col=1,
-            )
+            limits = test_limits.get(item_name, {})
+            lower = limits.get("lower")
+            upper = limits.get("upper")
+            self._apply_limits(ax, lower, upper)
 
-            # Update y-axis label
-            fig.update_yaxes(title_text=item_name, row=row, col=1)
+        axes[-1].set_xticks(x)
+        axes[-1].set_xticklabels(time_points, rotation=0)
+        axes[-1].set_xlabel("时间点")
 
-        # Update layout
-        title = f"{product} - {batch}<br>{market} | {condition}"
-        if data.get("temperature_humidity", "未说明") != "未说明":
-            title += f"<br>{data['temperature_humidity']}"
+        title = f"{product} - {batch}\n{market} | {condition}"
+        temp_humidity = data.get("temperature_humidity", "未说明")
+        if temp_humidity != "未说明":
+            title += f"\n{temp_humidity}"
+        fig.suptitle(title, fontsize=CHART_TITLE_FONT_SIZE, fontweight="bold", y=0.98)
 
-        fig.update_layout(
-            title=dict(
-                text=title,
-                font=dict(size=CHART_TITLE_FONT_SIZE, color="#111827"),
-                x=0.5,
-                xanchor="center",
-            ),
-        )
-        self._apply_professional_style(fig, n_items, show_legend=False)
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
 
-        # Update x-axis
-        fig.update_xaxes(title_text="时间点", row=n_items, col=1)
-
-        # Save if requested
+        filename = f"{product}_{batch}.png"
+        filepath = output_dir / filename
         if save:
-            filename = f"{product}_{batch}.html"
-            filepath = output_dir / filename
-            fig.write_html(str(filepath), include_plotlyjs="cdn")
+            fig.savefig(filepath, bbox_inches="tight")
             self.charts_generated.append(filepath)
             print(f"  ✓ Chart saved: {filepath.name}")
-
-        return fig
+        plt.close(fig)
+        return filepath
 
     def create_combined_chart(
         self,
         data_list: List[Dict],
         save: bool = True,
         output_dir: Optional[Path] = None
-    ) -> go.Figure:
-        """Create a combined chart for multiple batches with same grouping
-
-        Args:
-            data_list: List of cleaned data dictionaries
-            save: Whether to save chart to file
-            output_dir: Output directory (uses CHARTS_DIR by default)
-
-        Returns:
-            Plotly Figure object
-        """
+    ) -> Path:
+        """Create a combined chart for multiple batches with same grouping"""
         if output_dir is None:
             output_dir = CHARTS_DIR
-
         output_dir.mkdir(parents=True, exist_ok=True)
 
         if not data_list:
             raise ValueError("No data provided for combined chart")
 
-        # Get common data
+        self._set_style()
+
         product = data_list[0]["product_name"]
         market = data_list[0]["market_standard"]
         condition = data_list[0]["test_condition"]
 
-        # Collect all unique test items across all batches
         all_test_items = set()
         for data in data_list:
             all_test_items.update(data["test_items"].keys())
         all_test_items = sorted(list(all_test_items))
 
-        # Create subplots - one for each test item
+        time_axis = self._build_time_axis(data_list)
+        x = np.arange(len(time_axis))
+
         n_items = len(all_test_items)
-        fig = make_subplots(
-            rows=n_items,
-            cols=1,
-            subplot_titles=all_test_items,
-            vertical_spacing=0.08,
-        )
+        fig, axes = plt.subplots(n_items, 1, figsize=self._figure_size(n_items), sharex=True)
+        if n_items == 1:
+            axes = [axes]
 
-        # Add traces for each batch
-        batch_color_idx = 0
-        for data in data_list:
+        palette = self._get_palette()
+        for batch_idx, data in enumerate(data_list):
             batch = data["batch_number"]
-            test_items = data["test_items"]
-            time_points = data["time_points"]
+            time_points = [str(tp) for tp in data["time_points"]]
+            time_index = {tp: i for i, tp in enumerate(time_points)}
 
-            palette = self._get_batch_palette()
-            batch_color = palette[batch_color_idx % len(palette)]
+            for item_idx, item_name in enumerate(all_test_items):
+                ax = axes[item_idx]
+                values = data["test_items"].get(item_name)
+                if not values:
+                    continue
 
-            for idx, item_name in enumerate(all_test_items):
-                row = idx + 1
+                aligned = []
+                for label in time_axis:
+                    if label in time_index and time_index[label] < len(values):
+                        aligned.append(values[time_index[label]])
+                    else:
+                        aligned.append(None)
+                y = np.array([v if v is not None else np.nan for v in aligned], dtype=float)
+                color = palette[batch_idx % len(palette)]
+                ax.plot(x, y, marker="o", label=batch, color=color)
+                ax.set_title(item_name, loc="left", fontweight="bold")
+                ax.set_ylabel(item_name)
 
-                if item_name in test_items:
-                    values = test_items[item_name]
+        for item_idx, item_name in enumerate(all_test_items):
+            ax = axes[item_idx]
+            limits = None
+            for data in data_list:
+                candidate = data.get("test_limits", {}).get(item_name)
+                if candidate and (candidate.get("lower") is not None or candidate.get("upper") is not None):
+                    limits = candidate
+                    break
+            if limits:
+                self._apply_limits(ax, limits.get("lower"), limits.get("upper"))
 
-                    fig.add_trace(
-                        go.Scatter(
-                            x=time_points,
-                            y=values,
-                            mode="lines+markers",
-                            name=f"{batch}",
-                            legendgroup=batch,
-                            showlegend=(idx == 0),
-                            line=dict(color=batch_color, width=2.5),
-                            marker=dict(size=7, line=dict(width=1, color="white")),
-                            hovertemplate=f"{batch}<br>%{{x}}<br>%{{y:.3f}}<extra></extra>",
-                        ),
-                        row=row,
-                        col=1,
-                    )
+        axes[-1].set_xticks(x)
+        axes[-1].set_xticklabels(time_axis, rotation=0)
+        axes[-1].set_xlabel("时间点")
 
-            batch_color_idx += 1
-
-        # Update y-axis labels
-        for idx, item_name in enumerate(all_test_items):
-            fig.update_yaxes(title_text=item_name, row=idx + 1, col=1)
-
-        # Update layout
-        title = f"{product} - 多批次对比<br>{market} | {condition}"
+        title = f"{product} - 多批次对比\n{market} | {condition}"
         temp_humidity = data_list[0].get("temperature_humidity", "未说明")
         if temp_humidity != "未说明":
-            title += f"<br>{temp_humidity}"
+            title += f"\n{temp_humidity}"
+        fig.suptitle(title, fontsize=CHART_TITLE_FONT_SIZE, fontweight="bold", y=0.98)
 
-        fig.update_layout(
-            title=dict(
-                text=title,
-                font=dict(size=CHART_TITLE_FONT_SIZE, color="#111827"),
-                x=0.5,
-                xanchor="center",
-            ),
-        )
-        self._apply_professional_style(fig, n_items, show_legend=True)
+        handles, labels = axes[0].get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, loc="upper right", bbox_to_anchor=(0.98, 0.98))
 
-        # Update x-axis
-        fig.update_xaxes(title_text="时间点", row=n_items, col=1)
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
 
-        # Save if requested
+        product_safe = product.replace("/", "_").replace("\\", "_")
+        market_safe = market.replace("/", "_").replace("\\", "_")
+        condition_safe = condition.replace("/", "_").replace("\\", "_")
+        filename = f"{product_safe}_{market_safe}_{condition_safe}_{len(data_list)}batches.png"
+        filepath = output_dir / filename
         if save:
-            # Create filename from product and condition
-            product_safe = product.replace("/", "_").replace("\\", "_")
-            market_safe = market.replace("/", "_").replace("\\", "_")
-            condition_safe = condition.replace("/", "_").replace("\\", "_")
-            batches_str = "_".join([d["batch_number"] for d in data_list])
-            filename = f"{product_safe}_{market_safe}_{condition_safe}_{len(data_list)}batches.html"
-            filepath = output_dir / filename
-            fig.write_html(str(filepath), include_plotlyjs="cdn")
+            fig.savefig(filepath, bbox_inches="tight")
             self.charts_generated.append(filepath)
             print(f"  ✓ Combined chart saved: {filepath.name}")
-
-        return fig
+        plt.close(fig)
+        return filepath
 
     def generate_all_charts(
         self,
         grouped_data: Dict[str, List[Dict]],
         output_dir: Optional[Path] = None
     ) -> List[Path]:
-        """Generate charts for all grouped data
-
-        Args:
-            grouped_data: Dictionary of grouped data from data_extractor
-            output_dir: Output directory (uses CHARTS_DIR by default)
-
-        Returns:
-            List of paths to generated chart files
-        """
+        """Generate charts for all grouped data"""
         if output_dir is None:
             output_dir = CHARTS_DIR
-
         output_dir.mkdir(parents=True, exist_ok=True)
 
         self.charts_generated = []
@@ -327,23 +278,14 @@ class ChartGenerator:
             print(f"\nGenerating charts for group: {group_key}")
 
             if len(data_list) == 1:
-                # Single batch chart
                 self.create_single_batch_chart(data_list[0], save=True, output_dir=output_dir)
             else:
-                # Combined chart for multiple batches
                 self.create_combined_chart(data_list, save=True, output_dir=output_dir)
 
         return self.charts_generated
 
     def save_chart_summary(self, output_dir: Optional[Path] = None) -> Path:
-        """Save a summary of generated charts
-
-        Args:
-            output_dir: Output directory (uses CHARTS_DIR by default)
-
-        Returns:
-            Path to summary file
-        """
+        """Save a summary of generated charts"""
         if output_dir is None:
             output_dir = CHARTS_DIR
 

@@ -29,7 +29,7 @@ Drug-Chartor 是一个基于LLM的AI智能体工作流项目，用于从药品�
 #### chart_generator.py - 图表生成
 - ✓ 单批次图表生成
 - ✓ 多批次对比图表生成
-- ✓ 交互式HTML图表
+- ✓ 静态PNG图表
 - ✓ 自定义样式配置
 
 #### workflow.py - 工作流编排
@@ -107,17 +107,17 @@ drug-chartor/
    ↓
 6. 输出结果
    ├─ 提取的JSON数据
-   ├─ 交互式HTML图表
+   ├─ 静态PNG图表
    └─ 处理摘要
 ```
 
 ## 技术栈
 
-- **语言**：Python 3.8+
+- **语言**：Python 3.9+
 - **文档处理**：pywin32 (Windows COM)
 - **LLM集成**：OpenAI API（兼容接口）
 - **数据处理**：pandas, numpy
-- **图表生成**：plotly
+- **图表生成**：matplotlib
 - **配置管理**：python-dotenv
 - **CLI**：argparse
 
@@ -130,11 +130,10 @@ drug-chartor/
 - ✓ 支持多种检测项目（干燥失重、水分、有关物质等）
 
 ### 图表生成
-- ✓ 交互式HTML图表
+- ✓ 静态PNG图表
 - ✓ 支持多批次对比
 - ✓ 自动按市场/标准分组
-- ✓ 响应式设计
-- ✓ 可导出为PNG
+- ✓ 适合报告归档
 
 ### 用户友好
 - ✓ 简单的CLI接口
@@ -177,7 +176,7 @@ python main.py \
 ### 输出
 - 转换文件: CSV, HTML
 - 提取数据: JSON
-- 图表: 交互式HTML
+- 图表: PNG
 
 ## 配置说明
 

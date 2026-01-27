@@ -115,6 +115,7 @@ class DataExtractor:
             "temperature_humidity": "",
             "time_points": [],
             "test_items": {},
+            "test_limits": {},
         }
 
         # Validate product name
@@ -185,6 +186,7 @@ class DataExtractor:
             return None
 
         valid_items = {}
+        valid_limits = {}
         for item_name, values in test_items.items():
             if not isinstance(item_name, str) or not isinstance(values, list):
                 continue
@@ -220,11 +222,24 @@ class DataExtractor:
 
                 valid_items[item_name] = numeric_values
 
+                # Normalize limits if provided
+                raw_limits = {}
+                limits_data = data.get("test_limits", {})
+                if isinstance(limits_data, dict):
+                    raw_limits = limits_data.get(item_name, {}) or {}
+                lower = raw_limits.get("lower")
+                upper = raw_limits.get("upper")
+                norm_lower = float(lower) if self.is_numeric_value(lower) else None
+                norm_upper = float(upper) if self.is_numeric_value(upper) else None
+                if norm_lower is not None or norm_upper is not None:
+                    valid_limits[item_name] = {"lower": norm_lower, "upper": norm_upper}
+
         if not valid_items:
             print("  Error: No valid test items found")
             return None
 
         cleaned_data["test_items"] = valid_items
+        cleaned_data["test_limits"] = valid_limits
 
         # Preserve metadata
         if "_metadata" in data:

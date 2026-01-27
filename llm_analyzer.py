@@ -55,6 +55,10 @@ Format A (preferred, multiple batches):
     "test_items": {
       "test_item_name": [numeric_values],
       "test_item_name_2": [numeric_values]
+    },
+    "test_limits": {
+      "test_item_name": {"lower": number_or_null, "upper": number_or_null},
+      "test_item_name_2": {"lower": number_or_null, "upper": number_or_null}
     }
   }
 ]
@@ -72,6 +76,10 @@ Format B (single batch):
   "test_items": {
     "test_item_name": [numeric_values],
     "test_item_name_2": [numeric_values]
+  },
+  "test_limits": {
+    "test_item_name": {"lower": number_or_null, "upper": number_or_null},
+    "test_item_name_2": {"lower": number_or_null, "upper": number_or_null}
   }
 }
 ```
@@ -90,6 +98,7 @@ Important rules:
    - 杂质
    - 含量/含量测定
    - related substances, impurities, assay, etc.
+8. test_limits: Extract lower/upper limits for each test item if present in tables. If limits are not present in the document or are text-only (e.g., "报告值"), set them to null.
 
 EXCLUDE text-only items like:
 - 外观
