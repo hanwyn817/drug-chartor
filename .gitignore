@@ -1,0 +1,10 @@
+.DS_Store
+.venv
+__pycache__/
+.env
+
+# Project data folders
+input/
+output/
+extracted/
+charts/
