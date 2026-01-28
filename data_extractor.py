@@ -23,6 +23,87 @@ class DataExtractor:
         self.invalid_data = []
 
     @staticmethod
+    def _to_float(value) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            cleaned = value.strip().replace(",", "")
+            if not cleaned:
+                return None
+            match = re.search(r"-?\d+(?:\.\d+)?", cleaned)
+            if match:
+                try:
+                    return float(match.group())
+                except ValueError:
+                    return None
+        return None
+
+    @staticmethod
+    def _normalize_month(value) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(value, str):
+            match = re.search(r"\d+", value)
+            if match:
+                return int(match.group())
+        return None
+
+    def _normalize_timepoints(self, timepoints: List) -> List[int]:
+        months = []
+        for tp in timepoints or []:
+            month = self._normalize_month(tp)
+            if month is not None:
+                months.append(month)
+        return sorted(set(months))
+
+    def _normalize_range(self, payload) -> Dict:
+        normalized = {"nominal": None, "tolerance": None, "min": None, "max": None, "raw": None}
+        if isinstance(payload, dict):
+            normalized["nominal"] = self._to_float(payload.get("nominal"))
+            normalized["tolerance"] = self._to_float(payload.get("tolerance"))
+            normalized["min"] = self._to_float(payload.get("min"))
+            normalized["max"] = self._to_float(payload.get("max"))
+            raw = payload.get("raw")
+            if raw is not None and str(raw).strip():
+                normalized["raw"] = str(raw).strip()
+        elif payload is not None:
+            normalized["raw"] = str(payload).strip()
+        return normalized
+
+    def _normalize_spec(self, spec) -> Dict:
+        normalized = {"type": None, "min": None, "max": None, "value": None, "raw": None}
+        if isinstance(spec, dict):
+            normalized["type"] = spec.get("type")
+            normalized["min"] = self._to_float(spec.get("min"))
+            normalized["max"] = self._to_float(spec.get("max"))
+            normalized["value"] = self._to_float(spec.get("value"))
+            raw = spec.get("raw")
+            if raw is not None and str(raw).strip():
+                normalized["raw"] = str(raw).strip()
+        elif spec is not None:
+            normalized["raw"] = str(spec).strip()
+        return normalized
+
+    def _normalize_detection_limit(self, detection_limit) -> Dict:
+        normalized = {"type": None, "value": None, "unit": None, "raw": None}
+        if isinstance(detection_limit, dict):
+            normalized["type"] = detection_limit.get("type")
+            normalized["value"] = self._to_float(detection_limit.get("value"))
+            unit = detection_limit.get("unit")
+            if isinstance(unit, str) and unit.strip():
+                normalized["unit"] = unit.strip()
+            raw = detection_limit.get("raw")
+            if raw is not None and str(raw).strip():
+                normalized["raw"] = str(raw).strip()
+        elif detection_limit is not None:
+            normalized["raw"] = str(detection_limit).strip()
+        return normalized
+
+    @staticmethod
     def validate_batch_number(batch: str) -> bool:
         """Validate batch number format (D5XXX-YY-ZZZ)
 
@@ -45,207 +126,212 @@ class DataExtractor:
         Returns:
             True if numeric, False otherwise
         """
-        if value is None:
-            return False
-        try:
-            float(value)
-            return True
-        except (ValueError, TypeError):
-            return False
+        return DataExtractor._to_float(value) is not None
 
-    def validate_test_item(self, item_name: str, values: List) -> bool:
-        """Validate a test item and its values
+    def validate_test_item(self, item_name: str, results: List[Dict]) -> bool:
+        """Validate a test item and its results
 
         Args:
             item_name: Name of the test item
-            values: List of numeric values
+            results: List of results_by_timepoint dictionaries
 
         Returns:
             True if valid test item with numeric values, False otherwise
         """
-        # Normalize item name to lowercase for comparison
-        item_lower = item_name.lower().strip()
+        item_lower = (item_name or "").lower().strip()
 
-        # Check if explicitly rejected (text-only items)
         for rejected in REJECTED_TEST_ITEMS:
             if rejected.lower() in item_lower:
                 return False
 
-        # Check if it's an accepted test item type
-        is_accepted = False
-        for accepted in ACCEPTED_TEST_ITEMS:
-            if accepted.lower() in item_lower:
-                is_accepted = True
-                break
+        is_accepted = any(accepted.lower() in item_lower for accepted in ACCEPTED_TEST_ITEMS)
 
-        # If not in accepted list, still allow if it has numeric values
-        # But must verify all values are numeric
-        if not is_accepted:
-            print(f"  Warning: '{item_name}' not in standard test items")
-
-        # Check if all values are numeric (None is allowed for missing values)
-        if not values:
+        if not results:
             return False
 
         has_numeric = False
-        for v in values:
-            if v is None:
+        for result in results:
+            if not isinstance(result, dict):
                 continue
-            if not self.is_numeric_value(v):
-                print(f"  Warning: Non-numeric value in '{item_name}': {v}")
-                return False
-            has_numeric = True
+            value = result.get("value")
+            if value is None:
+                value = self._to_float(result.get("raw"))
+            if value is None:
+                replicate_values = result.get("replicate_values") or []
+                for rv in replicate_values:
+                    if self._to_float(rv) is not None:
+                        value = 0.0
+                        break
+            if value is not None:
+                has_numeric = True
+
+        if not is_accepted and not has_numeric:
+            print(f"  Warning: '{item_name}' has no numeric results")
 
         return has_numeric
 
-    def validate_and_clean_data(self, data: Dict) -> Optional[Dict]:
-        """Validate and clean extracted stability data
+    def validate_and_clean_data(self, data: Dict) -> Optional[List[Dict]]:
+        """Validate and clean extracted stability data (new schema)
 
         Args:
-            data: Raw data from LLM
+            data: Raw data from LLM (document-level object)
 
         Returns:
-            Cleaned data dictionary, or None if invalid
+            List of cleaned study-level dictionaries, or None if invalid
         """
-        cleaned_data = {
-            "product_name": "",
-            "batch_number": "",
-            "market_standard": "",
-            "test_condition": "",
-            "temperature_humidity": "",
-            "time_points": [],
-            "test_items": {},
-            "test_limits": {},
-        }
+        if not isinstance(data, dict):
+            print("  Error: Invalid data format")
+            return None
 
-        # Validate product name
-        product_name = data.get("product_name", "").strip()
+        file_level = data.get("file_level", {}) if isinstance(data.get("file_level"), dict) else {}
+        product_name = (file_level.get("product_name") or "").strip()
         if not product_name:
-            print("  Error: Missing product name")
-            return None
-        cleaned_data["product_name"] = product_name
+            product_name = "未知产品"
 
-        # Validate batch number
-        batch_number = data.get("batch_number", "").strip()
-        if not batch_number:
-            print("  Error: Missing batch number")
-            return None
-        if not self.validate_batch_number(batch_number):
-            print(f"  Error: Invalid batch number format: {batch_number}")
-            return None
-        cleaned_data["batch_number"] = batch_number
+        file_regulatory = (file_level.get("regulatory_context") or "").strip()
 
-        # Market standard (optional, default to "未知" if missing)
-        market_standard = data.get("market_standard", "").strip()
-        if not market_standard:
-            market_standard = "未知"
-        cleaned_data["market_standard"] = market_standard
-
-        # Test condition
-        test_condition = data.get("test_condition", "").strip()
-        if not test_condition:
-            test_condition = "未知条件"
-        cleaned_data["test_condition"] = test_condition
-
-        # Temperature/humidity (optional)
-        temp_humidity = data.get("temperature_humidity", "").strip()
-        if not temp_humidity:
-            temp_humidity = "未说明"
-        cleaned_data["temperature_humidity"] = temp_humidity
-
-        # Time points
-        time_points = data.get("time_points", [])
-        if not isinstance(time_points, list) or not time_points:
-            print("  Error: Missing or invalid time_points")
+        batches = data.get("batches", [])
+        if not isinstance(batches, list) or not batches:
+            print("  Error: Missing or invalid batches")
             return None
 
-        # Parse time points and extract numeric months
-        cleaned_time_points = []
-        for idx, tp in enumerate(time_points):
-            if isinstance(tp, str):
-                match = re.search(r"\d+", tp)
-                if match:
-                    month = int(match.group())
-                    cleaned_time_points.append({"original": tp, "month": month, "index": idx})
-                else:
-                    print(f"  Warning: Cannot parse time point: {tp}")
+        cleaned_entries: List[Dict] = []
 
-        if not cleaned_time_points:
-            print("  Error: No valid time points found")
-            return None
+        for batch in batches:
+            if not isinstance(batch, dict):
+                continue
+            batch_id = (batch.get("batch_id") or "").strip()
+            if not batch_id:
+                batch_id = "未知批号"
+            elif not self.validate_batch_number(batch_id):
+                print(f"  Warning: Invalid batch number format: {batch_id}")
 
-        # Sort by month and keep original indices for value reordering
-        cleaned_time_points.sort(key=lambda x: x["month"])
-        cleaned_data["time_points"] = [tp["original"] for tp in cleaned_time_points]
-        sorted_indices = [tp["index"] for tp in cleaned_time_points]
-
-        # Test items
-        test_items = data.get("test_items", {})
-        if not isinstance(test_items, dict):
-            print("  Error: Invalid test_items format")
-            return None
-
-        valid_items = {}
-        valid_limits = {}
-        for item_name, values in test_items.items():
-            if not isinstance(item_name, str) or not isinstance(values, list):
+            studies = batch.get("studies", [])
+            if not isinstance(studies, list) or not studies:
                 continue
 
-            if not values:
-                continue
+            for study in studies:
+                if not isinstance(study, dict):
+                    continue
 
-            # Reorder values according to sorted time points
-            reordered_values = []
-            for idx in sorted_indices:
-                if idx < len(values):
-                    reordered_values.append(values[idx])
-                else:
-                    reordered_values.append(None)
+                regulatory_context = (study.get("regulatory_context") or file_regulatory or "未知").strip()
+                stability_condition = (study.get("stability_condition") or "").strip() or None
+                stability_condition_label = (study.get("stability_condition_label") or "").strip() or None
+                condition_enum = (study.get("condition_enum") or "").strip() or None
 
-            # Ensure values match number of time points
-            if len(reordered_values) != len(cleaned_time_points):
-                print(f"  Warning: '{item_name}' has {len(reordered_values)} values but {len(cleaned_time_points)} time points")
-                if len(reordered_values) < len(cleaned_time_points):
-                    reordered_values = reordered_values + [None] * (len(cleaned_time_points) - len(reordered_values))
-                else:
-                    reordered_values = reordered_values[:len(cleaned_time_points)]
+                temperature_c = self._normalize_range(study.get("temperature_c"))
+                humidity_rh = self._normalize_range(study.get("humidity_rh"))
 
-            # Validate test item
-            if self.validate_test_item(item_name, reordered_values):
-                # Convert values to floats
-                numeric_values = []
-                for v in reordered_values:
-                    if v is not None and self.is_numeric_value(v):
-                        numeric_values.append(float(v))
-                    else:
-                        numeric_values.append(None)
+                timepoints = self._normalize_timepoints(study.get("timepoints_months", []))
 
-                valid_items[item_name] = numeric_values
+                items_raw = study.get("items", [])
+                if not isinstance(items_raw, list):
+                    items_raw = []
 
-                # Normalize limits if provided
-                raw_limits = {}
-                limits_data = data.get("test_limits", {})
-                if isinstance(limits_data, dict):
-                    raw_limits = limits_data.get(item_name, {}) or {}
-                lower = raw_limits.get("lower")
-                upper = raw_limits.get("upper")
-                norm_lower = float(lower) if self.is_numeric_value(lower) else None
-                norm_upper = float(upper) if self.is_numeric_value(upper) else None
-                if norm_lower is not None or norm_upper is not None:
-                    valid_limits[item_name] = {"lower": norm_lower, "upper": norm_upper}
+                cleaned_items = []
+                derived_months = set()
 
-        if not valid_items:
-            print("  Error: No valid test items found")
+                for item in items_raw:
+                    if not isinstance(item, dict):
+                        continue
+
+                    item_name = item.get("item_name")
+                    normalized_name = item.get("normalized_name")
+                    name_for_validation = normalized_name or item_name or ""
+                    unit = item.get("unit")
+                    if isinstance(unit, str):
+                        unit = unit.strip() or None
+
+                    spec = self._normalize_spec(item.get("spec"))
+
+                    results_raw = item.get("results_by_timepoint", [])
+                    if not isinstance(results_raw, list):
+                        results_raw = []
+
+                    normalized_results = []
+                    for result in results_raw:
+                        if not isinstance(result, dict):
+                            continue
+                        month = self._normalize_month(result.get("month"))
+                        if month is None:
+                            month = self._normalize_month(result.get("raw"))
+                        if month is not None:
+                            derived_months.add(month)
+
+                        value = self._to_float(result.get("value"))
+                        raw = result.get("raw")
+                        if raw is not None and str(raw).strip():
+                            raw = str(raw).strip()
+
+                        qualifier = result.get("qualifier")
+
+                        replicate_values = result.get("replicate_values")
+                        if isinstance(replicate_values, list):
+                            parsed_reps = [self._to_float(rv) for rv in replicate_values]
+                            replicate_values = [rv for rv in parsed_reps if rv is not None] or None
+
+                        detection_limit = self._normalize_detection_limit(result.get("detection_limit"))
+
+                        normalized_results.append(
+                            {
+                                "month": month,
+                                "value": value,
+                                "raw": raw,
+                                "qualifier": qualifier,
+                                "replicate_values": replicate_values,
+                                "detection_limit": detection_limit,
+                            }
+                        )
+
+                    if not self.validate_test_item(name_for_validation, normalized_results):
+                        continue
+
+                    cleaned_items.append(
+                        {
+                            "item_name": item_name,
+                            "normalized_name": normalized_name,
+                            "unit": unit,
+                            "spec": spec,
+                            "results_by_timepoint": normalized_results,
+                            "confidence": item.get("confidence"),
+                        }
+                    )
+
+                if not cleaned_items:
+                    print("  Error: No valid test items found")
+                    continue
+
+                if not timepoints:
+                    timepoints = sorted(derived_months)
+                if not timepoints:
+                    print("  Error: Missing timepoints_months")
+                    continue
+
+                cleaned_entry = {
+                    "product_name": product_name,
+                    "regulatory_context": regulatory_context or "未知",
+                    "batch_id": batch_id,
+                    "stability_condition": stability_condition,
+                    "stability_condition_label": stability_condition_label,
+                    "condition_enum": condition_enum,
+                    "temperature_c": temperature_c,
+                    "humidity_rh": humidity_rh,
+                    "timepoints_months": timepoints,
+                    "items": cleaned_items,
+                    "source_snippets": study.get("source_snippets", []),
+                    "confidence": study.get("confidence"),
+                }
+
+                if "_metadata" in data:
+                    cleaned_entry["_metadata"] = data["_metadata"]
+
+                cleaned_entries.append(cleaned_entry)
+
+        if not cleaned_entries:
+            print("  Error: No valid studies found")
             return None
 
-        cleaned_data["test_items"] = valid_items
-        cleaned_data["test_limits"] = valid_limits
-
-        # Preserve metadata
-        if "_metadata" in data:
-            cleaned_data["_metadata"] = data["_metadata"]
-
-        return cleaned_data
+        return cleaned_entries
 
     def parse_llm_response(self, response: str) -> Optional[Dict]:
         """Parse LLM JSON response
@@ -273,7 +359,7 @@ class DataExtractor:
             return None
 
     def aggregate_by_grouping(self, data_list: List[Dict]) -> Dict[str, List[Dict]]:
-        """Group data by (product, market_standard, test_condition)
+        """Group data by (product, regulatory_context, stability_condition_label)
 
         Args:
             data_list: List of cleaned data dictionaries
@@ -284,8 +370,13 @@ class DataExtractor:
         grouped = defaultdict(list)
 
         for data in data_list:
-            # Create grouping key
-            key = f"{data['product_name']}_{data['market_standard']}_{data['test_condition']}"
+            condition = (
+                data.get("stability_condition_label")
+                or data.get("stability_condition")
+                or data.get("condition_enum")
+                or "未知条件"
+            )
+            key = f"{data.get('product_name', 'Unknown')}_{data.get('regulatory_context', '未知')}_{condition}"
             grouped[key].append(data)
 
         return dict(grouped)
@@ -305,10 +396,30 @@ class DataExtractor:
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Create filename from product and batch
-        product = data["product_name"].replace("/", "_").replace("\\", "_")
-        batch = data["batch_number"]
-        filename = f"{product}_{batch}.json"
+        # Create filename from product, batch, and condition
+        def _safe(value: str) -> str:
+            return str(value).replace("/", "_").replace("\\", "_").strip()
+
+        product = _safe(data.get("product_name", "Unknown"))
+        batch = _safe(data.get("batch_id", "Unknown"))
+        condition = _safe(
+            data.get("stability_condition_label")
+            or data.get("stability_condition")
+            or data.get("condition_enum")
+            or "condition"
+        )
+        source_stem = None
+        source_file = data.get("_metadata", {}).get("source_file") if isinstance(data.get("_metadata"), dict) else None
+        if source_file:
+            try:
+                source_stem = Path(source_file).stem
+            except Exception:
+                source_stem = None
+
+        filename = f"{product}_{batch}_{condition}"
+        if source_stem:
+            filename += f"_{_safe(source_stem)}"
+        filename += ".json"
         filepath = output_dir / filename
 
         with open(filepath, "w", encoding="utf-8") as f:
@@ -321,7 +432,7 @@ class DataExtractor:
         raw_data_list: List[Dict],
         output_dir: Optional[Path] = None,
     ) -> Tuple[List[Dict], List[Dict]]:
-        """Process a batch of raw data from LLM
+        """Process a batch of raw data from LLM (document-level objects)
 
         Args:
             raw_data_list: List of raw data dictionaries from LLM
@@ -329,22 +440,25 @@ class DataExtractor:
         Returns:
             Tuple of (valid_data, invalid_data)
         """
-        valid_data = []
-        invalid_data = []
+        valid_data: List[Dict] = []
+        invalid_data: List[Dict] = []
 
         for raw_data in raw_data_list:
-            print(f"Processing: {raw_data.get('product_name', 'Unknown')} - {raw_data.get('batch_number', 'Unknown')}")
+            file_level = raw_data.get("file_level", {}) if isinstance(raw_data, dict) else {}
+            product = file_level.get("product_name", "Unknown")
+            batch_count = len(raw_data.get("batches", [])) if isinstance(raw_data, dict) else 0
+            print(f"Processing: {product} - {batch_count} batch(es)")
 
-            cleaned = self.validate_and_clean_data(raw_data)
+            cleaned_list = self.validate_and_clean_data(raw_data)
 
-            if cleaned:
-                valid_data.append(cleaned)
-                # Save to file
-                filepath = self.save_extracted_data(cleaned, output_dir=output_dir)
-                print(f"  ✓ Saved: {filepath.name}")
+            if cleaned_list:
+                for cleaned in cleaned_list:
+                    valid_data.append(cleaned)
+                    filepath = self.save_extracted_data(cleaned, output_dir=output_dir)
+                    print(f"  ✓ Saved: {filepath.name}")
             else:
                 invalid_data.append(raw_data)
-                print(f"  ✗ Invalid data")
+                print("  ✗ Invalid data")
 
         self.extracted_data = valid_data
         self.invalid_data = invalid_data
@@ -361,6 +475,6 @@ class DataExtractor:
             "total_processed": len(self.extracted_data) + len(self.invalid_data),
             "valid": len(self.extracted_data),
             "invalid": len(self.invalid_data),
-            "unique_products": len(set(d["product_name"] for d in self.extracted_data)),
-            "unique_batches": len(set(d["batch_number"] for d in self.extracted_data)),
+            "unique_products": len(set(d.get("product_name") for d in self.extracted_data)),
+            "unique_batches": len(set(d.get("batch_id") for d in self.extracted_data)),
         }

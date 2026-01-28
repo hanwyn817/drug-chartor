@@ -26,8 +26,12 @@ LLM_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 # LLM Processing Settings
 LLM_TEMPERATURE = 0.0
-LLM_MAX_TOKENS = 4000
-LLM_TIMEOUT = 60
+LLM_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "4000"))
+# Base timeout (seconds)
+LLM_TIMEOUT = int(os.getenv("OPENAI_TIMEOUT", "60"))
+# Stage-specific timeouts (seconds)
+LLM_TIMEOUT_SCREENING = int(os.getenv("OPENAI_SCREENING_TIMEOUT", str(LLM_TIMEOUT)))
+LLM_TIMEOUT_EXTRACTION = int(os.getenv("OPENAI_EXTRACTION_TIMEOUT", str(max(LLM_TIMEOUT, 180))))
 
 # Retry configuration
 MAX_RETRIES = 3

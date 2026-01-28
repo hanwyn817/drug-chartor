@@ -57,22 +57,97 @@ class ChartGenerator:
         )
 
     @staticmethod
-    def _parse_month(tp: str) -> Optional[int]:
-        match = re.search(r"\d+", str(tp))
+    def _normalize_month(value) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return int(value)
+        match = re.search(r"\d+", str(value))
         if match:
             return int(match.group())
         return None
 
-    def _build_time_axis(self, data_list: List[Dict]) -> List[str]:
-        seen = {}
+    @staticmethod
+    def _format_month_label(month: Optional[int]) -> str:
+        if month is None:
+            return "未知"
+        return f"{month}月"
+
+    def _extract_timepoints(self, data: Dict) -> List[int]:
+        months = []
+        for tp in data.get("timepoints_months", []):
+            month = self._normalize_month(tp)
+            if month is not None:
+                months.append(month)
+        if not months:
+            for item in data.get("items", []):
+                for result in item.get("results_by_timepoint", []):
+                    month = self._normalize_month(result.get("month"))
+                    if month is not None:
+                        months.append(month)
+        return sorted(set(months))
+
+    def _build_time_axis(self, data_list: List[Dict]) -> List[int]:
+        months = set()
         for data in data_list:
-            for tp in data.get("time_points", []):
-                label = str(tp)
-                if label not in seen:
-                    seen[label] = self._parse_month(label)
-        items = list(seen.items())
-        items.sort(key=lambda x: (x[1] is None, x[1] if x[1] is not None else 0, x[0]))
-        return [label for label, _ in items]
+            for month in self._extract_timepoints(data):
+                months.add(month)
+        return sorted(months)
+
+    @staticmethod
+    def _item_label(item: Dict) -> str:
+        name = item.get("normalized_name") or item.get("item_name")
+        return str(name) if name else "未知项目"
+
+    @staticmethod
+    def _spec_to_limits(spec: Optional[Dict]) -> Tuple[Optional[float], Optional[float]]:
+        if not isinstance(spec, dict):
+            return None, None
+        lower = spec.get("min")
+        upper = spec.get("max")
+        value = spec.get("value")
+        spec_type = str(spec.get("type") or "").lower()
+        if lower is None and upper is None and value is not None:
+            if spec_type in {"max", "upper", "<=", "≤", "not_more_than"}:
+                upper = value
+            elif spec_type in {"min", "lower", ">=", "≥", "not_less_than"}:
+                lower = value
+        return lower, upper
+
+    @staticmethod
+    def _format_temperature(temp: Optional[Dict]) -> Optional[str]:
+        if not isinstance(temp, dict):
+            return str(temp) if temp else None
+        if temp.get("raw"):
+            return str(temp.get("raw"))
+        if temp.get("min") is not None and temp.get("max") is not None:
+            return f"{temp['min']}-{temp['max']}℃"
+        if temp.get("nominal") is not None:
+            if temp.get("tolerance") is not None:
+                return f"{temp['nominal']}±{temp['tolerance']}℃"
+            return f"{temp['nominal']}℃"
+        return None
+
+    @staticmethod
+    def _format_humidity(humidity: Optional[Dict]) -> Optional[str]:
+        if not isinstance(humidity, dict):
+            return str(humidity) if humidity else None
+        if humidity.get("raw"):
+            return str(humidity.get("raw"))
+        if humidity.get("min") is not None and humidity.get("max") is not None:
+            return f"{humidity['min']}-{humidity['max']}%RH"
+        if humidity.get("nominal") is not None:
+            if humidity.get("tolerance") is not None:
+                return f"{humidity['nominal']}±{humidity['tolerance']}%RH"
+            return f"{humidity['nominal']}%RH"
+        return None
+
+    def _format_environment(self, data: Dict) -> Optional[str]:
+        temp = self._format_temperature(data.get("temperature_c"))
+        humidity = self._format_humidity(data.get("humidity_rh"))
+        if temp and humidity:
+            return f"{temp} / {humidity}"
+        return temp or humidity
 
     @staticmethod
     def _get_palette() -> List[str]:
@@ -119,40 +194,52 @@ class ChartGenerator:
 
         self._set_style()
 
-        product = data["product_name"]
-        batch = data["batch_number"]
-        market = data["market_standard"]
-        condition = data["test_condition"]
-        time_points = data["time_points"]
-        test_items = data["test_items"]
-        test_limits = data.get("test_limits", {})
+        product = data.get("product_name", "Unknown")
+        batch = data.get("batch_id", "Unknown")
+        regulatory = data.get("regulatory_context", "未知")
+        condition = (
+            data.get("stability_condition_label")
+            or data.get("stability_condition")
+            or data.get("condition_enum")
+            or "未知条件"
+        )
+        time_axis = self._build_time_axis([data])
+        items = [item for item in data.get("items", []) if isinstance(item, dict)]
 
-        n_items = len(test_items)
+        n_items = len(items)
         fig, axes = plt.subplots(n_items, 1, figsize=self._figure_size(n_items), sharex=True)
         if n_items == 1:
             axes = [axes]
 
-        x = np.arange(len(time_points))
-        for idx, (item_name, values) in enumerate(test_items.items()):
+        x = np.arange(len(time_axis))
+        for idx, item in enumerate(items):
             ax = axes[idx]
+            item_name = self._item_label(item)
+            month_to_value = {}
+            for result in item.get("results_by_timepoint", []):
+                if not isinstance(result, dict):
+                    continue
+                month = self._normalize_month(result.get("month"))
+                if month is None:
+                    continue
+                month_to_value[month] = result.get("value")
+            values = [month_to_value.get(m) for m in time_axis]
             y = np.array([v if v is not None else np.nan for v in values], dtype=float)
             ax.plot(x, y, marker="o", color="#2563eb")
             ax.set_title(item_name, loc="left", fontweight="bold")
             ax.set_ylabel(item_name)
 
-            limits = test_limits.get(item_name, {})
-            lower = limits.get("lower")
-            upper = limits.get("upper")
+            lower, upper = self._spec_to_limits(item.get("spec"))
             self._apply_limits(ax, lower, upper)
 
         axes[-1].set_xticks(x)
-        axes[-1].set_xticklabels(time_points, rotation=0)
+        axes[-1].set_xticklabels([self._format_month_label(m) for m in time_axis], rotation=0)
         axes[-1].set_xlabel("时间点")
 
-        title = f"{product} - {batch}\n{market} | {condition}"
-        temp_humidity = data.get("temperature_humidity", "未说明")
-        if temp_humidity != "未说明":
-            title += f"\n{temp_humidity}"
+        title = f"{product} - {batch}\n{regulatory} | {condition}"
+        env = self._format_environment(data)
+        if env:
+            title += f"\n{env}"
         fig.suptitle(title, fontsize=CHART_TITLE_FONT_SIZE, fontweight="bold", y=0.98)
 
         fig.tight_layout(rect=[0, 0, 1, 0.94])
@@ -182,14 +269,23 @@ class ChartGenerator:
 
         self._set_style()
 
-        product = data_list[0]["product_name"]
-        market = data_list[0]["market_standard"]
-        condition = data_list[0]["test_condition"]
+        product = data_list[0].get("product_name", "Unknown")
+        regulatory = data_list[0].get("regulatory_context", "未知")
+        condition = (
+            data_list[0].get("stability_condition_label")
+            or data_list[0].get("stability_condition")
+            or data_list[0].get("condition_enum")
+            or "未知条件"
+        )
 
-        all_test_items = set()
+        all_test_items = []
+        seen_items = set()
         for data in data_list:
-            all_test_items.update(data["test_items"].keys())
-        all_test_items = sorted(list(all_test_items))
+            for item in data.get("items", []):
+                name = self._item_label(item)
+                if name not in seen_items:
+                    seen_items.add(name)
+                    all_test_items.append(name)
 
         time_axis = self._build_time_axis(data_list)
         x = np.arange(len(time_axis))
@@ -201,22 +297,24 @@ class ChartGenerator:
 
         palette = self._get_palette()
         for batch_idx, data in enumerate(data_list):
-            batch = data["batch_number"]
-            time_points = [str(tp) for tp in data["time_points"]]
-            time_index = {tp: i for i, tp in enumerate(time_points)}
+            batch = data.get("batch_id", "Unknown")
+            item_map = {}
+            for item in data.get("items", []):
+                name = self._item_label(item)
+                month_to_value = {}
+                for result in item.get("results_by_timepoint", []):
+                    if not isinstance(result, dict):
+                        continue
+                    month = self._normalize_month(result.get("month"))
+                    if month is None:
+                        continue
+                    month_to_value[month] = result.get("value")
+                item_map[name] = month_to_value
 
             for item_idx, item_name in enumerate(all_test_items):
                 ax = axes[item_idx]
-                values = data["test_items"].get(item_name)
-                if not values:
-                    continue
-
-                aligned = []
-                for label in time_axis:
-                    if label in time_index and time_index[label] < len(values):
-                        aligned.append(values[time_index[label]])
-                    else:
-                        aligned.append(None)
+                month_to_value = item_map.get(item_name, {})
+                aligned = [month_to_value.get(m) for m in time_axis]
                 y = np.array([v if v is not None else np.nan for v in aligned], dtype=float)
                 color = palette[batch_idx % len(palette)]
                 ax.plot(x, y, marker="o", label=batch, color=color)
@@ -227,21 +325,26 @@ class ChartGenerator:
             ax = axes[item_idx]
             limits = None
             for data in data_list:
-                candidate = data.get("test_limits", {}).get(item_name)
-                if candidate and (candidate.get("lower") is not None or candidate.get("upper") is not None):
-                    limits = candidate
+                for item in data.get("items", []):
+                    if self._item_label(item) != item_name:
+                        continue
+                    lower, upper = self._spec_to_limits(item.get("spec"))
+                    if lower is not None or upper is not None:
+                        limits = (lower, upper)
+                        break
+                if limits:
                     break
             if limits:
-                self._apply_limits(ax, limits.get("lower"), limits.get("upper"))
+                self._apply_limits(ax, limits[0], limits[1])
 
         axes[-1].set_xticks(x)
-        axes[-1].set_xticklabels(time_axis, rotation=0)
+        axes[-1].set_xticklabels([self._format_month_label(m) for m in time_axis], rotation=0)
         axes[-1].set_xlabel("时间点")
 
-        title = f"{product} - 多批次对比\n{market} | {condition}"
-        temp_humidity = data_list[0].get("temperature_humidity", "未说明")
-        if temp_humidity != "未说明":
-            title += f"\n{temp_humidity}"
+        title = f"{product} - 多批次对比\n{regulatory} | {condition}"
+        env = self._format_environment(data_list[0])
+        if env:
+            title += f"\n{env}"
         fig.suptitle(title, fontsize=CHART_TITLE_FONT_SIZE, fontweight="bold", y=0.98)
 
         handles, labels = axes[0].get_legend_handles_labels()
@@ -251,9 +354,9 @@ class ChartGenerator:
         fig.tight_layout(rect=[0, 0, 1, 0.94])
 
         product_safe = product.replace("/", "_").replace("\\", "_")
-        market_safe = market.replace("/", "_").replace("\\", "_")
+        regulatory_safe = regulatory.replace("/", "_").replace("\\", "_")
         condition_safe = condition.replace("/", "_").replace("\\", "_")
-        filename = f"{product_safe}_{market_safe}_{condition_safe}_{len(data_list)}batches.png"
+        filename = f"{product_safe}_{regulatory_safe}_{condition_safe}_{len(data_list)}batches.png"
         filepath = output_dir / filename
         if save:
             fig.savefig(filepath, bbox_inches="tight")
